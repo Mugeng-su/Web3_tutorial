@@ -14,16 +14,16 @@ import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/shared/interf
 contract FundMe {
     mapping (address => uint256) public fundersToAmount;//创建一个映射，地址对应投资数值，记录投资人信息
 
-    uint256 constant MINIMUM_VALUE = 1 * 10 ** 18; //USD
+    uint256 constant MINIMUM_VALUE = 100 * 10 ** 18; //USD
 
-    AggregatorV3Interface internal dataFeed; //合约作为类型
+    AggregatorV3Interface public dataFeed; //合约作为类型
     //光有这个变量（合约的接口）还不行，还需要知道这个合约的地址，来初始化这个变量。
     //我们希望能够在部署完合约之后就能直接使用dataFeed，所以需要引入构造函数。
     //构造函数是部署合约时自动执行的初始化函数，只运行一次。
 
     uint256 constant TARGET = 1000 * 10 ** 18;
 
-    address owner;
+    address public owner;
 
     uint256 deploymentTimestamp; //众筹开始时间点  
     //为什么这里用uint256这种数字的类型来表示时间？因为在solidity中是没有类似py或者java有date这种数据类型。
@@ -35,9 +35,12 @@ contract FundMe {
 
     bool public getFundSuccess; //这个变量是为了记录getFund函数是否被成功执行。 布尔型变量默认都是false
 
-    constructor(uint256 _lockTime){
+    event FundWithdrawnByOwner(uint256); //定义一个事件，用于记录owner提取资金的操作，参数是提取的金额
+    event RefundByFunder(address, uint256); //定义一个事件，用于记录投资人退款的操作，参数是投资人的地址和退款金额
+
+    constructor(uint256 _lockTime, address dataFeedAddr){
         //sepolia testnet
-        dataFeed =  AggregatorV3Interface(0x694AA1769357215DE4FAC081bf1f309aDC325306);
+        dataFeed =  AggregatorV3Interface(dataFeedAddr);
         owner = msg.sender; //这里就是规定owner是合约的sender。修改合约的ownership见下边的新函数：transferOwnership()
     
     //其中的一个入参就需要是这个dataFeed的地址，但是由于我们使用了第三方服务，所以需要到对应的测试网上进行compile和deploy等测试操作
@@ -82,15 +85,17 @@ contract FundMe {
     }
     //下边是后两个功能
     function getFund() external windowClosed onlyOwner {
-        uint256 balance = convertEthToUsd(address(this).balance); 
         //获取到本合约的余额并为美刀
-        require(balance >= TARGET, "Target is not reached");
+        require(convertEthToUsd(address(this).balance) >= TARGET, "Target is not reached");
         //要求合约余额需大于目标值，否则返回没达标
         bool success;
-        (success, ) = payable(msg.sender).call{value: address(this).balance}("");
+        uint256 balance = address(this).balance; //获取合约的余额
+        (success, ) = payable(msg.sender).call{value: balance}("");
         require(success, "transfer tx failed");
         fundersToAmount[msg.sender] = 0;
         getFundSuccess = true; // flag:当一个变量用于标注某种状态的时候，就称之为flag。
+        // emit event
+        emit FundWithdrawnByOwner(balance);
     }
 
     function refund() external windowClosed {
@@ -102,9 +107,11 @@ contract FundMe {
         require((block.timestamp) >= deploymentTimestamp + lockTime, "window is not yet closed");
         
         bool success;
-        (success, ) = payable(msg.sender).call{value: fundersToAmount[msg.sender]}("");//通过了两个require后就可以退款了。
+        uint256 balance = fundersToAmount[msg.sender]; //获取投资人地址的余额
+        (success, ) = payable(msg.sender).call{value: balance}("");//通过了两个require后就可以退款了。
         require(success, "transfer tx failed");
         fundersToAmount[msg.sender] = 0;
+        emit RefundByFunder(msg.sender, balance);
     }
 
     function setErc20Addr(address _erc20Addr) public onlyOwner { //这里就是调用了onlyOwner这个modifier

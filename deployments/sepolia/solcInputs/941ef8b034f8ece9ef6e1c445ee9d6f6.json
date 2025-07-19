@@ -1,0 +1,39 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol": {
+      "content": "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.0;\n\n// solhint-disable-next-line interface-starts-with-i\ninterface AggregatorV3Interface {\n  function decimals() external view returns (uint8);\n\n  function description() external view returns (string memory);\n\n  function version() external view returns (uint256);\n\n  function getRoundData(\n    uint80 _roundId\n  ) external view returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound);\n\n  function latestRoundData()\n    external\n    view\n    returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound);\n}\n"
+    },
+    "contracts/FundMe.sol": {
+      "content": "//SPDX-License-Identifier: MIT\npragma solidity ^0.8.20;\n\n\nimport {AggregatorV3Interface} from \"@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol\";\n//通过chainlink上的实例复制的预言机引用\n\n\n//1. 创建一个收款函数\n//2. 记录投资人并且查看\n//3. 在锁定期内，达到目标值，生产商可以提款\n//4. 在锁定期内，没有达到目标值，投资人可以退款\n\ncontract FundMe {\n    mapping (address => uint256) public fundersToAmount;//创建一个映射，地址对应投资数值，记录投资人信息\n\n    uint256 constant MINIMUM_VALUE = 1 * 10 ** 18; //USD\n\n    AggregatorV3Interface public dataFeed; //合约作为类型\n    //光有这个变量（合约的接口）还不行，还需要知道这个合约的地址，来初始化这个变量。\n    //我们希望能够在部署完合约之后就能直接使用dataFeed，所以需要引入构造函数。\n    //构造函数是部署合约时自动执行的初始化函数，只运行一次。\n\n    uint256 constant TARGET = 1000 * 10 ** 18;\n\n    address public owner;\n\n    uint256 deploymentTimestamp; //众筹开始时间点  \n    //为什么这里用uint256这种数字的类型来表示时间？因为在solidity中是没有类似py或者java有date这种数据类型。\n    //unix时间戳 unixtimestamp.com 从1970年1月1号开始到目前的时间点总共经过了多少秒\n    uint256 lockTime; //时间窗口，这个单位就是秒，设置=60就是60秒。这个就是用户（众筹发起人）来输入这个锁定期\n    //这两个变量都放在构造函数里\n\n    address erc20Addr; //声明这个变量是为了后边setErc20Addr函数用于设定erc20的地址\n\n    bool public getFundSuccess; //这个变量是为了记录getFund函数是否被成功执行。 布尔型变量默认都是false\n\n    constructor(uint256 _lockTime, address dataFeedAddr){\n        //sepolia testnet\n        dataFeed =  AggregatorV3Interface(dataFeedAddr);\n        owner = msg.sender; //这里就是规定owner是合约的sender。修改合约的ownership见下边的新函数：transferOwnership()\n    \n    //其中的一个入参就需要是这个dataFeed的地址，但是由于我们使用了第三方服务，所以需要到对应的测试网上进行compile和deploy等测试操作\n    //由于我们已经能够直接获得这个地址，所以直接写在函数体中，没有使用让用户入参。\n\n        deploymentTimestamp = block.timestamp;\n        //这个block表示当前的区块，.timestamp就是合约部署是的时间戳\n        lockTime = _lockTime;\n        //这个是入参，所以需要再构造函数里也设置好这个入参。\n    }\n\n    function fund() external payable {\n        require(convertEthToUsd(msg.value) >= MINIMUM_VALUE, \"Send more ETH\");\n        require((block.timestamp) < deploymentTimestamp + lockTime, \"window is closed\");\n        //这里需要限制在fund的时候这个时间戳的时间是小于合约部署的时间戳加上时间窗口的时间，否则返回fund窗口已关闭。\n        //这里的block.timestamp是调用fund函数是的时间戳\n        fundersToAmount[msg.sender] = msg.value; //记录投资人和投资数额\n    }\n\n     function getChainlinkDataFeedLatestAnswer() public view returns (int) {\n        // prettier-ignore\n        (\n            /* uint80 roundId */,\n            int256 answer,\n            /*uint256 startedAt*/,\n            /*uint256 updatedAt*/,\n            /*uint80 answeredInRound*/\n        ) = dataFeed.latestRoundData();\n        return answer;\n        //这里拿到了USD对ETH的价格，然后下一步是需要运算。\n    }\n\n    function convertEthToUsd(uint256 ethAmount) internal view returns (uint256){\n        uint256 ethPrice = uint256(getChainlinkDataFeedLatestAnswer());\n        //数字类型的强制转换，否则会报错\n        return ethAmount * ethPrice / (10 ** 8);\n        //注意这里的ethAmount的精度是10的18次方，ethPrice的精度是10的8次方\n    }\n    \n    function transferOwnership(address newOwner) public onlyOwner {\n        owner = newOwner; //newOwner是入参，也就是调用这个函数，输如newOwner的地址即可转换ownership。\n    }\n    //下边是后两个功能\n    function getFund() external windowClosed onlyOwner {\n        uint256 balance = convertEthToUsd(address(this).balance); \n        //获取到本合约的余额并为美刀\n        require(balance >= TARGET, \"Target is not reached\");\n        //要求合约余额需大于目标值，否则返回没达标\n        bool success;\n        (success, ) = payable(msg.sender).call{value: address(this).balance}(\"\");\n        require(success, \"transfer tx failed\");\n        fundersToAmount[msg.sender] = 0;\n        getFundSuccess = true; // flag:当一个变量用于标注某种状态的时候，就称之为flag。\n    }\n\n    function refund() external windowClosed {\n        require(convertEthToUsd(address(this).balance) < TARGET, \"Target is reached.\");//这个函数是给投资方退款的。\n        //接下来是写退款\n        //先检测这个人有没有fund过，通过查收目前这个地址有没有在mapping里\n        uint256 amount = fundersToAmount[msg.sender];\n        require(amount != 0, \"there is no fund for you\"); //如果发现该地址的fund amount等于0，则返回there is no fund.\n        require((block.timestamp) >= deploymentTimestamp + lockTime, \"window is not yet closed\");\n        \n        bool success;\n        (success, ) = payable(msg.sender).call{value: fundersToAmount[msg.sender]}(\"\");//通过了两个require后就可以退款了。\n        require(success, \"transfer tx failed\");\n        fundersToAmount[msg.sender] = 0;\n    }\n\n    function setErc20Addr(address _erc20Addr) public onlyOwner { //这里就是调用了onlyOwner这个modifier\n        erc20Addr = _erc20Addr; // 让传入的erc20的地址能够进行使用\n    }\n\n\n    function setFunderToAmount(address funder, uint256 amountToUpdate) external {//这个函数两个入参，一个是funder的地址，一个是要更新的数量\n        require(msg.sender == erc20Addr, \"You do not have permission to call this function\");\n        //这里需要限定只能是erc20合约来调用该函数，所以需要一个函数来声明erc20的地址。\n        fundersToAmount[funder] = amountToUpdate;\n        //传入两个入参，修改fundersToAmount的数量\n    }\n\n\n    modifier windowClosed(){\n        require((block.timestamp) >= deploymentTimestamp + lockTime, \"window is not yet closed\");\n        //这里需要限制在fund的时候这个时间戳的时间是不小于合约部署的时间戳加上时间窗口的时间，否则返回fund窗口未关闭。\n        _;\n        //先执行判断，再执行函数中的其他操作。\n    }\n\n    modifier onlyOwner(){\n        require(msg.sender == owner, \"this function can only be called by owner\"); \n        //限定该函数只能由owner调用\n        _;\n    }\n}"
+    }
+  },
+  "settings": {
+    "evmVersion": "paris",
+    "optimizer": {
+      "enabled": false,
+      "runs": 200
+    },
+    "outputSelection": {
+      "*": {
+        "*": [
+          "abi",
+          "evm.bytecode",
+          "evm.deployedBytecode",
+          "evm.methodIdentifiers",
+          "metadata",
+          "devdoc",
+          "userdoc",
+          "storageLayout",
+          "evm.gasEstimates"
+        ],
+        "": [
+          "ast"
+        ]
+      }
+    },
+    "metadata": {
+      "useLiteralContent": true
+    }
+  }
+}
